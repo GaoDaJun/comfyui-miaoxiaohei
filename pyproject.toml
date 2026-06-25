@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-miaoxiaohei"
+version = "0.1.2"
+description = "ComfyUI custom nodes for the MiaoXiaoHei image vectorization API."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31.0",
+  "Pillow>=10.0.0",
+  "numpy>=1.24.0"
+]
+
+[tool.ruff]
+line-length = 120
