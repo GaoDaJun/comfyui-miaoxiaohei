@@ -3,9 +3,11 @@
 1. 在 ComfyUI 中添加一个图片加载节点。
 2. 将图片输出连接到 `MiaoXiaoHei Image to SVG` 节点。
 3. `base_url` 填写你的服务地址，例如 `https://www.miaoxiaohei.com`。
-4. `api_key` 填写喵小黑后台发放的 API Key，也可以设置环境变量 `MIAOXIAOHEI_API_KEY` 后留空。
+4. `api_key` 填写喵小黑后台发放的 API Key。
 5. 运行工作流。
 6. 转换完成后，SVG 文件会保存到 ComfyUI 的 `output/miaoxiaohei/` 目录。
+
+安装后无需额外执行 `pip install`。把仓库拉到 `ComfyUI/custom_nodes`，重启 ComfyUI，然后在节点卡片中填写 API Key 即可使用。
 
 上传前处理规则：
 

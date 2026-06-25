@@ -3,11 +3,14 @@ import json
 import os
 import re
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import numpy as np
-import requests
 from PIL import Image
 
 try:
@@ -16,7 +19,7 @@ except Exception:  # pragma: no cover - only used outside ComfyUI during local c
     folder_paths = None
 
 
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 DEFAULT_BASE_URL = "https://www.miaoxiaohei.com"
 USER_AGENT = f"ComfyUI-MiaoXiaoHei/{PLUGIN_VERSION}"
 DEFAULT_MAX_PIXELS = 2000 * 2000
@@ -43,6 +46,47 @@ def _headers(api_key: str) -> Dict[str, str]:
         "X-API-Key": _api_key(api_key),
         "User-Agent": USER_AGENT,
     }
+
+
+def _http_request(
+    url: str,
+    method: str = "GET",
+    headers: Dict[str, str] | None = None,
+    body: bytes | None = None,
+    timeout: int = 60,
+) -> Tuple[int, Dict[str, str], bytes]:
+    request = urllib.request.Request(url, data=body, headers=headers or {}, method=method.upper())
+    try:
+        with urllib.request.urlopen(request, timeout=max(10, int(timeout or 60))) as response:
+            return response.status, dict(response.headers.items()), response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, dict(error.headers.items()), error.read()
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"API request failed: {error.reason}") from error
+
+
+def _append_query(url: str, params: Dict[str, Any]) -> str:
+    clean_params = {key: value for key, value in params.items() if value is not None}
+    if not clean_params:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}{urllib.parse.urlencode(clean_params)}"
+
+
+def _multipart_form_data(field_name: str, filename: str, content: bytes, content_type: str) -> Tuple[bytes, str]:
+    boundary = f"----MiaoXiaoHeiComfyUI{uuid.uuid4().hex}"
+    lines = [
+        f"--{boundary}\r\n".encode("utf-8"),
+        (
+            f'Content-Disposition: form-data; name="{field_name}"; '
+            f'filename="{filename}"\r\n'
+        ).encode("utf-8"),
+        f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"),
+        content,
+        b"\r\n",
+        f"--{boundary}--\r\n".encode("utf-8"),
+    ]
+    return b"".join(lines), f"multipart/form-data; boundary={boundary}"
 
 
 def _safe_filename(text: str, fallback: str = "miaoxiaohei") -> str:
@@ -146,12 +190,12 @@ def _prepare_upload_image(
         return buffer.getvalue(), "image.jpg", "image/jpeg"
 
 
-def _read_json_response(response: requests.Response) -> Dict[str, Any]:
+def _read_json_response(status_code: int, content: bytes) -> Dict[str, Any]:
     try:
-        return response.json()
+        return json.loads(content.decode("utf-8", errors="replace"))
     except json.JSONDecodeError:
-        text = response.text[:500] if response.text else ""
-        raise RuntimeError(f"API returned non-JSON response ({response.status_code}): {text}")
+        text = content.decode("utf-8", errors="replace")[:500] if content else ""
+        raise RuntimeError(f"API returned non-JSON response ({status_code}): {text}")
 
 
 def _raise_for_api_error(payload: Dict[str, Any], fallback: str = "MiaoXiaoHei API request failed.") -> None:
@@ -196,14 +240,20 @@ class MiaoXiaoHeiVectorize:
     ) -> Tuple[str, str, str, str]:
         upload_bytes, upload_name, upload_mime = _prepare_upload_image(image, max_pixels, upload_quality)
         url = f"{_clean_base_url(base_url)}/api/vectorize"
-        response = requests.post(
+        body, content_type = _multipart_form_data("image", upload_name, upload_bytes, upload_mime)
+        headers = {
+            **_headers(api_key),
+            "Content-Type": content_type,
+        }
+        status_code, _, content = _http_request(
             url,
-            headers=_headers(api_key),
-            files={"image": (upload_name, upload_bytes, upload_mime)},
+            method="POST",
+            headers=headers,
+            body=body,
             timeout=max(10, int(timeout_seconds or 180)),
         )
-        payload = _read_json_response(response)
-        _raise_for_api_error(payload, f"Vectorize failed with HTTP {response.status_code}.")
+        payload = _read_json_response(status_code, content)
+        _raise_for_api_error(payload, f"Vectorize failed with HTTP {status_code}.")
 
         svg_text = str(payload.get("svg") or "")
         if "<svg" not in svg_text.lower():
@@ -255,19 +305,24 @@ class MiaoXiaoHeiDownloadResult:
             raise ValueError("format must be svg, pdf, or eps.")
 
         url = f"{_clean_base_url(base_url)}/api/vectorize/download/{clean_request_id}/{output_format}"
-        response = requests.get(url, headers=_headers(api_key), timeout=max(10, int(timeout_seconds or 180)))
-        content_type = response.headers.get("Content-Type", "")
+        status_code, response_headers, content = _http_request(
+            url,
+            method="GET",
+            headers=_headers(api_key),
+            timeout=max(10, int(timeout_seconds or 180)),
+        )
+        content_type = response_headers.get("Content-Type", "")
 
         if "application/json" in content_type:
-            payload = _read_json_response(response)
-            _raise_for_api_error(payload, f"Download failed with HTTP {response.status_code}.")
+            payload = _read_json_response(status_code, content)
+            _raise_for_api_error(payload, f"Download failed with HTTP {status_code}.")
 
-        if response.status_code >= 400:
-            text = response.text[:500] if response.text else response.reason
-            raise RuntimeError(f"Download failed with HTTP {response.status_code}: {text}")
+        if status_code >= 400:
+            text = content.decode("utf-8", errors="replace")[:500] if content else ""
+            raise RuntimeError(f"Download failed with HTTP {status_code}: {text}")
 
         file_path = _unique_path(filename_prefix, output_format, clean_request_id)
-        file_path.write_bytes(response.content)
+        file_path.write_bytes(content)
         return (str(file_path),)
 
 
@@ -295,15 +350,18 @@ class MiaoXiaoHeiUsage:
         page: int = 1,
         timeout_seconds: int = 60,
     ) -> Tuple[str, str]:
-        url = f"{_clean_base_url(base_url)}/api/vectorize/usage"
-        response = requests.get(
+        url = _append_query(
+            f"{_clean_base_url(base_url)}/api/vectorize/usage",
+            {"page": max(1, int(page or 1))},
+        )
+        status_code, _, content = _http_request(
             url,
+            method="GET",
             headers=_headers(api_key),
-            params={"page": max(1, int(page or 1))},
             timeout=max(10, int(timeout_seconds or 60)),
         )
-        payload = _read_json_response(response)
-        _raise_for_api_error(payload, f"Usage query failed with HTTP {response.status_code}.")
+        payload = _read_json_response(status_code, content)
+        _raise_for_api_error(payload, f"Usage query failed with HTTP {status_code}.")
 
         data = payload.get("data") or {}
         client = data.get("client") or {}
