@@ -369,8 +369,8 @@ class MiaoXiaoHeiSvgPreview:
     OUTPUT_NODE = True
 
     def run(self, **kwargs) -> Dict[str, Any]:
-        svg_result = kwargs.get("SVG结果") or kwargs.get("svg_result")
-        original_image = kwargs.get("原图") or kwargs.get("original_image")
+        svg_result = kwargs["SVG结果"] if "SVG结果" in kwargs else kwargs.get("svg_result")
+        original_image = kwargs["原图"] if "原图" in kwargs else kwargs.get("original_image")
 
         if not isinstance(svg_result, dict):
             raise ValueError("请连接“喵小黑图片转 SVG”节点输出的 SVG结果。")
