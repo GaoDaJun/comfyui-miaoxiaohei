@@ -34,21 +34,23 @@ function getPreviewWidgetHeight(node) {
   return Math.max(MIN_WIDGET_HEIGHT, nodeHeight - NODE_HEADER_AND_INPUTS_HEIGHT);
 }
 
-function getPreviewWidgetWidth(node, availableWidth) {
-  const rawWidth = Number(availableWidth || node?.size?.[0] || MIN_NODE_WIDTH);
+function getPreviewWidgetWidth(node) {
+  const rawWidth = Number(node?.size?.[0] || MIN_NODE_WIDTH);
   return Math.max(MIN_WIDGET_WIDTH, rawWidth - NODE_HORIZONTAL_INSET);
 }
 
-function syncPreviewElementSize(node, element, availableWidth) {
+function syncPreviewElementSize(node, element) {
+  const width = getPreviewWidgetWidth(node);
   const height = getPreviewWidgetHeight(node);
-  const nextSizeKey = `${Math.round(height)}`;
+  const nextSizeKey = `${Math.round(width)}x${Math.round(height)}`;
 
   if (element.__mxhSizeKey === nextSizeKey) {
-    return { width: getPreviewWidgetWidth(node, availableWidth), height };
+    return { width, height };
   }
 
   element.style.width = "100%";
   element.style.height = `${height}px`;
+  element.style.minWidth = `${width}px`;
   element.style.maxWidth = "100%";
   element.style.overflow = "hidden";
   element.style.minHeight = `${MIN_WIDGET_HEIGHT}px`;
@@ -56,12 +58,20 @@ function syncPreviewElementSize(node, element, availableWidth) {
   element.style.setProperty("--comfy-widget-height", `${height}px`);
   element.style.setProperty("--comfy-widget-min-height", `${MIN_WIDGET_HEIGHT}px`);
   element.__mxhSizeKey = nextSizeKey;
-  return { width: getPreviewWidgetWidth(node, availableWidth), height };
+  return { width, height };
 }
 
 function stopWheelPropagation(event) {
   event.preventDefault();
   event.stopPropagation();
+}
+
+function syncAfterInteraction(node, element) {
+  window.requestAnimationFrame(() => {
+    if (!isNodeInGraph(node)) return;
+    syncPreviewElementSize(node, element);
+    app.graph?.setDirtyCanvas?.(true, true);
+  });
 }
 
 function renamePreviewInputs(node) {
@@ -173,6 +183,9 @@ function removePreviewWidget(node) {
 
 function attachPreviewWidget(node, element) {
   syncPreviewElementSize(node, element);
+  element.addEventListener("pointerdown", () => syncAfterInteraction(node, element));
+  element.addEventListener("pointerup", () => syncAfterInteraction(node, element));
+  element.addEventListener("click", () => syncAfterInteraction(node, element));
   const widget = node.addDOMWidget(PREVIEW_WIDGET_NAME, "div", element, {
     serialize: false,
     hideOnZoom: false,
@@ -181,8 +194,8 @@ function attachPreviewWidget(node, element) {
     onResize: () => syncPreviewElementSize(node, element),
   });
   widget.computeSize = (width) => {
-    const nodeWidth = Math.max(width || node.size?.[0] || MIN_NODE_WIDTH, MIN_WIDGET_WIDTH);
-    const size = syncPreviewElementSize(node, element, width);
+    const nodeWidth = Math.max(node.size?.[0] || MIN_NODE_WIDTH, MIN_WIDGET_WIDTH);
+    const size = syncPreviewElementSize(node, element);
     return [nodeWidth, size.height];
   };
   widget.computeLayoutSize = (targetNode) => {
