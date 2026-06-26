@@ -2,6 +2,11 @@ import { app } from "../../scripts/app.js";
 
 const EXTENSION_NAME = "miaoxiaohei.svg.preview";
 const LOGO_URL = new URL("./miaoxiaohei_logo.svg", import.meta.url).href;
+const MIN_NODE_WIDTH = 560;
+const MIN_NODE_HEIGHT = 520;
+const MIN_WIDGET_WIDTH = 420;
+const MIN_WIDGET_HEIGHT = 300;
+const NODE_HEADER_AND_INPUTS_HEIGHT = 112;
 
 function svgDataUrl(svgText) {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgText || "")}`;
@@ -19,6 +24,39 @@ function imageApiUrl(imageInfo) {
 
 function downloadUrl(resultId, format) {
   return `/miaoxiaohei/download/${encodeURIComponent(resultId || "")}/${format}`;
+}
+
+function getPreviewWidgetHeight(node) {
+  const nodeHeight = Math.max(node?.size?.[1] || MIN_NODE_HEIGHT, MIN_NODE_HEIGHT);
+  return Math.max(MIN_WIDGET_HEIGHT, nodeHeight - NODE_HEADER_AND_INPUTS_HEIGHT);
+}
+
+function syncPreviewElementSize(node, element) {
+  const height = getPreviewWidgetHeight(node);
+  element.style.width = "100%";
+  element.style.height = `${height}px`;
+  element.style.minHeight = `${MIN_WIDGET_HEIGHT}px`;
+  element.style.setProperty("--comfy-widget-height", `${height}px`);
+  element.style.setProperty("--comfy-widget-min-height", `${MIN_WIDGET_HEIGHT}px`);
+  return height;
+}
+
+function renamePreviewInputs(node) {
+  if (!node?.inputs?.length) return;
+  let changed = false;
+  for (const input of node.inputs) {
+    if (input.name === "svg_result") {
+      input.name = "SVG结果";
+      changed = true;
+    } else if (input.name === "original_image") {
+      input.name = "原图";
+      changed = true;
+    }
+  }
+  if (changed) {
+    node.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
+  }
 }
 
 function createButton(label, onClick) {
@@ -100,9 +138,14 @@ async function copySvgWithFeedback(button, svgText) {
 function buildPreviewElement(data) {
   const root = document.createElement("div");
   root.className = "mxh-preview";
+  root.dataset.captureWheel = "true";
 
   const stage = document.createElement("div");
   stage.className = "mxh-stage";
+  stage.dataset.captureWheel = "true";
+
+  const viewport = document.createElement("div");
+  viewport.className = "mxh-viewport";
 
   const original = document.createElement("img");
   original.className = "mxh-image mxh-original";
@@ -137,9 +180,14 @@ function buildPreviewElement(data) {
   rightTag.className = "mxh-tag mxh-right-tag";
   rightTag.textContent = "SVG";
 
-  stage.append(original, svgWrap, line, handle, leftTag, rightTag);
+  viewport.append(original, svgWrap, line, handle);
+  stage.append(viewport, leftTag, rightTag);
 
   let ratio = 0.5;
+  let zoom = 1;
+  let offsetX = 0;
+  let offsetY = 0;
+
   const applyRatio = () => {
     const percent = `${Math.round(ratio * 10000) / 100}%`;
     svgWrap.style.clipPath = `inset(0 0 0 ${percent})`;
@@ -147,8 +195,14 @@ function buildPreviewElement(data) {
     handle.style.left = percent;
   };
 
+  const applyTransform = () => {
+    const transform = `translate(${offsetX}px, ${offsetY}px) scale(${zoom})`;
+    original.style.transform = transform;
+    svgImage.style.transform = transform;
+  };
+
   const move = (event) => {
-    const rect = stage.getBoundingClientRect();
+    const rect = viewport.getBoundingClientRect();
     ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
     applyRatio();
   };
@@ -158,13 +212,34 @@ function buildPreviewElement(data) {
     window.removeEventListener("pointerup", stop);
   };
 
-  stage.addEventListener("pointerdown", (event) => {
+  handle.addEventListener("pointerdown", (event) => {
     event.preventDefault();
+    event.stopPropagation();
     move(event);
+    handle.setPointerCapture?.(event.pointerId);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop);
   });
+
+  stage.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const previousZoom = zoom;
+    const direction = event.deltaY > 0 ? -1 : 1;
+    zoom = Math.max(0.35, Math.min(6, zoom * (direction > 0 ? 1.12 : 0.88)));
+
+    const rect = viewport.getBoundingClientRect();
+    const pointX = event.clientX - rect.left - rect.width / 2;
+    const pointY = event.clientY - rect.top - rect.height / 2;
+    const scaleChange = zoom / previousZoom;
+    offsetX = pointX - (pointX - offsetX) * scaleChange;
+    offsetY = pointY - (pointY - offsetY) * scaleChange;
+    applyTransform();
+  }, { passive: false });
+
   applyRatio();
+  applyTransform();
 
   const actions = document.createElement("div");
   actions.className = "mxh-actions";
@@ -186,19 +261,23 @@ function injectStyles() {
   style.id = "mxh-preview-style";
   style.textContent = `
     .mxh-preview {
-      width: 520px;
-      max-width: 100%;
+      width: 100%;
+      height: 100%;
+      min-height: 260px;
       padding: 12px;
       border-radius: 12px;
       background: #171717;
       color: #fff;
       box-sizing: border-box;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto;
+      gap: 10px;
     }
     .mxh-stage {
       position: relative;
       width: 100%;
-      aspect-ratio: 1.45;
+      min-height: 0;
       overflow: hidden;
       border-radius: 10px;
       background:
@@ -209,8 +288,14 @@ function injectStyles() {
         #202033;
       background-size: 22px 22px;
       background-position: 0 0, 0 11px, 11px -11px, -11px 0;
-      cursor: ew-resize;
+      cursor: zoom-in;
       touch-action: none;
+    }
+    .mxh-viewport {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      transform-origin: center center;
     }
     .mxh-image {
       position: absolute;
@@ -221,11 +306,13 @@ function injectStyles() {
       background: transparent;
       user-select: none;
       pointer-events: none;
+      transform-origin: center center;
     }
     .mxh-svg-wrap {
       position: absolute;
       inset: 0;
       pointer-events: none;
+      transform-origin: center center;
     }
     .mxh-slider-line {
       position: absolute;
@@ -250,7 +337,10 @@ function injectStyles() {
       background: rgba(255,255,255,.95);
       border: 1px solid rgba(0,0,0,.12);
       box-shadow: 0 10px 28px rgba(0,0,0,.22);
-      pointer-events: none;
+      cursor: ew-resize;
+      pointer-events: auto;
+      touch-action: none;
+      z-index: 3;
     }
     .mxh-slider-handle img {
       width: 30px;
@@ -267,6 +357,7 @@ function injectStyles() {
       font-weight: 700;
       color: #fff;
       pointer-events: none;
+      z-index: 4;
     }
     .mxh-left-tag { left: 12px; }
     .mxh-right-tag { right: 12px; }
@@ -274,7 +365,7 @@ function injectStyles() {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 8px;
-      margin-top: 10px;
+      margin: 0;
     }
     .mxh-actions button {
       min-height: 32px;
@@ -299,6 +390,7 @@ function injectStyles() {
 
 function showPreviewWidget(node, data) {
   injectStyles();
+  renamePreviewInputs(node);
   node.widgets = (node.widgets || []).filter((widget) => {
     if (widget.name !== "mxh_preview_widget") return true;
     widget.onRemove?.();
@@ -306,12 +398,42 @@ function showPreviewWidget(node, data) {
   });
 
   const element = buildPreviewElement(data);
+  syncPreviewElementSize(node, element);
   const widget = node.addDOMWidget("mxh_preview_widget", "div", element, {
     serialize: false,
     hideOnZoom: false,
+    getMinHeight: () => MIN_WIDGET_HEIGHT,
+    getHeight: () => syncPreviewElementSize(node, element),
+    onResize: () => syncPreviewElementSize(node, element),
   });
-  widget.computeSize = () => [540, 430];
-  node.size = [Math.max(node.size?.[0] || 0, 560), Math.max(node.size?.[1] || 0, 500)];
+  widget.computeSize = (width) => {
+    const nodeWidth = Math.max(width || node.size?.[0] || MIN_NODE_WIDTH, MIN_WIDGET_WIDTH);
+    return [nodeWidth, syncPreviewElementSize(node, element)];
+  };
+  widget.computeLayoutSize = (targetNode) => {
+    return {
+      minWidth: MIN_WIDGET_WIDTH,
+      minHeight: syncPreviewElementSize(targetNode || node, element),
+    };
+  };
+  widget.serializeValue = () => undefined;
+  widget.serialize = false;
+  node.size = [
+    Math.max(node.size?.[0] || 0, MIN_NODE_WIDTH),
+    Math.max(node.size?.[1] || 0, MIN_NODE_HEIGHT),
+  ];
+  if (!node.__mxhPreviewResizePatched) {
+    const onResize = node.onResize;
+    node.onResize = function onMiaoXiaoHeiPreviewResize(size) {
+      const result = onResize?.apply(this, arguments);
+      const previewWidget = this.widgets?.find((item) => item.name === "mxh_preview_widget");
+      if (previewWidget?.element) {
+        syncPreviewElementSize(this, previewWidget.element);
+      }
+      return result;
+    };
+    node.__mxhPreviewResizePatched = true;
+  }
   app.graph.setDirtyCanvas(true, true);
 }
 
@@ -320,9 +442,24 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "MiaoXiaoHeiSvgPreview") return;
 
+    const onNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function onMiaoXiaoHeiPreviewCreated() {
+      const result = onNodeCreated?.apply(this, arguments);
+      renamePreviewInputs(this);
+      return result;
+    };
+
+    const onConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function onMiaoXiaoHeiPreviewConfigured() {
+      const result = onConfigure?.apply(this, arguments);
+      renamePreviewInputs(this);
+      return result;
+    };
+
     const onExecuted = nodeType.prototype.onExecuted;
     nodeType.prototype.onExecuted = function onMiaoXiaoHeiPreviewExecuted(message) {
       onExecuted?.apply(this, arguments);
+      renamePreviewInputs(this);
       const data = {
         svgText: message?.svg?.[0] || "",
         resultId: message?.result_id?.[0] || "",
@@ -332,5 +469,15 @@ app.registerExtension({
         showPreviewWidget(this, data);
       }
     };
+  },
+  nodeCreated(node) {
+    if (node?.comfyClass === "MiaoXiaoHeiSvgPreview" || node?.type === "MiaoXiaoHeiSvgPreview") {
+      renamePreviewInputs(node);
+    }
+  },
+  loadedGraphNode(node) {
+    if (node?.comfyClass === "MiaoXiaoHeiSvgPreview" || node?.type === "MiaoXiaoHeiSvgPreview") {
+      renamePreviewInputs(node);
+    }
   },
 });
