@@ -40,46 +40,23 @@ function getPreviewWidgetWidth(node, availableWidth) {
 }
 
 function syncPreviewElementSize(node, element, availableWidth) {
-  const parent = element.parentElement;
-  const width = getPreviewWidgetWidth(node, availableWidth);
   const height = getPreviewWidgetHeight(node);
-  const nextSizeKey = `${Math.round(width)}x${Math.round(height)}`;
+  const nextSizeKey = `${Math.round(height)}`;
 
-  if (element.__mxhSizeKey === nextSizeKey && parent?.__mxhSizeKey === nextSizeKey) {
-    return { width, height };
+  if (element.__mxhSizeKey === nextSizeKey) {
+    return { width: getPreviewWidgetWidth(node, availableWidth), height };
   }
 
-  if (parent) {
-    parent.style.width = `${width}px`;
-    parent.style.height = `${height}px`;
-    parent.style.minHeight = `${MIN_WIDGET_HEIGHT}px`;
-    parent.style.maxWidth = "100%";
-    parent.style.overflow = "hidden";
-    parent.__mxhSizeKey = nextSizeKey;
-  }
-
-  element.style.width = `${width}px`;
+  element.style.width = "100%";
   element.style.height = `${height}px`;
   element.style.maxWidth = "100%";
   element.style.overflow = "hidden";
   element.style.minHeight = `${MIN_WIDGET_HEIGHT}px`;
-  element.style.setProperty("--mxh-widget-width", `${width}px`);
   element.style.setProperty("--mxh-widget-height", `${height}px`);
   element.style.setProperty("--comfy-widget-height", `${height}px`);
   element.style.setProperty("--comfy-widget-min-height", `${MIN_WIDGET_HEIGHT}px`);
   element.__mxhSizeKey = nextSizeKey;
-  return { width, height };
-}
-
-function schedulePreviewSync(node, element) {
-  if (!node || !element) return;
-  if (element.__mxhSyncFrame) {
-    cancelAnimationFrame(element.__mxhSyncFrame);
-  }
-  element.__mxhSyncFrame = requestAnimationFrame(() => {
-    element.__mxhSyncFrame = null;
-    syncPreviewElementSize(node, element);
-  });
+  return { width: getPreviewWidgetWidth(node, availableWidth), height };
 }
 
 function stopWheelPropagation(event) {
@@ -123,6 +100,14 @@ function getExecutingNodeId(detail) {
 
 function getGraphNodes() {
   return app.graph?._nodes || app.graph?.nodes || [];
+}
+
+function isNodeInGraph(node) {
+  if (!node?.id) return false;
+  if (app.graph?.getNodeById) {
+    return Boolean(app.graph.getNodeById(node.id));
+  }
+  return getGraphNodes().some((item) => nodeIdEquals(item?.id, node.id));
 }
 
 function getNodeInput(node, names) {
@@ -181,14 +166,6 @@ function buildStatusElement(status = "waiting") {
 function removePreviewWidget(node) {
   node.widgets = (node.widgets || []).filter((widget) => {
     if (widget.name !== PREVIEW_WIDGET_NAME) return true;
-    if (widget.element?.__mxhResizeObserver) {
-      widget.element.__mxhResizeObserver.disconnect();
-      widget.element.__mxhResizeObserver = null;
-    }
-    if (widget.element?.__mxhSyncFrame) {
-      cancelAnimationFrame(widget.element.__mxhSyncFrame);
-      widget.element.__mxhSyncFrame = null;
-    }
     widget.onRemove?.();
     return false;
   });
@@ -217,23 +194,6 @@ function attachPreviewWidget(node, element) {
   };
   widget.serializeValue = () => undefined;
   widget.serialize = false;
-  const onRemove = widget.onRemove;
-  widget.onRemove = () => {
-    element.__mxhResizeObserver?.disconnect();
-    element.__mxhResizeObserver = null;
-    if (element.__mxhSyncFrame) {
-      cancelAnimationFrame(element.__mxhSyncFrame);
-      element.__mxhSyncFrame = null;
-    }
-    onRemove?.();
-  };
-  window.setTimeout(() => {
-    if (!element.parentElement || element.__mxhResizeObserver) return;
-    const resizeObserver = new ResizeObserver(() => schedulePreviewSync(node, element));
-    resizeObserver.observe(element.parentElement);
-    resizeObserver.observe(element);
-    element.__mxhResizeObserver = resizeObserver;
-  }, 0);
   return widget;
 }
 
@@ -252,39 +212,7 @@ function ensurePreviewNodeSizing(node) {
       }
       return result;
     };
-    const onDrawForeground = node.onDrawForeground;
-    node.onDrawForeground = function onMiaoXiaoHeiPreviewDrawForeground(ctx) {
-      const result = onDrawForeground?.apply(this, arguments);
-      const previewWidget = this.widgets?.find((item) => item.name === PREVIEW_WIDGET_NAME);
-      if (previewWidget?.element) {
-        syncPreviewElementSize(this, previewWidget.element);
-      }
-      return result;
-    };
-    const onMouseMove = node.onMouseMove;
-    node.onMouseMove = function onMiaoXiaoHeiPreviewMouseMove(event, pos, graphCanvas) {
-      const result = onMouseMove?.apply(this, arguments);
-      const previewWidget = this.widgets?.find((item) => item.name === PREVIEW_WIDGET_NAME);
-      if (previewWidget?.element) {
-        syncPreviewElementSize(this, previewWidget.element);
-      }
-      return result;
-    };
     node.__mxhPreviewResizePatched = true;
-  }
-}
-
-function syncPreviewNodeWidget(node) {
-  if (!isPreviewNode(node)) return;
-  const previewWidget = node.widgets?.find((item) => item.name === PREVIEW_WIDGET_NAME);
-  if (previewWidget?.element) {
-    syncPreviewElementSize(node, previewWidget.element);
-  }
-}
-
-function syncAllPreviewWidgets() {
-  for (const node of getGraphNodes()) {
-    syncPreviewNodeWidget(node);
   }
 }
 
@@ -663,6 +591,7 @@ function injectStyles() {
 }
 
 function showStatusWidget(node, status = "waiting") {
+  if (!isPreviewNode(node) || !isNodeInGraph(node)) return;
   injectStyles();
   renamePreviewInputs(node);
   removePreviewWidget(node);
@@ -674,6 +603,7 @@ function showStatusWidget(node, status = "waiting") {
 }
 
 function showPreviewWidget(node, data) {
+  if (!isPreviewNode(node) || !isNodeInGraph(node)) return;
   injectStyles();
   renamePreviewInputs(node);
   removePreviewWidget(node);
@@ -684,21 +614,17 @@ function showPreviewWidget(node, data) {
   app.graph.setDirtyCanvas(true, true);
 }
 
+function showWaitingWidgetWhenReady(node) {
+  window.setTimeout(() => {
+    if (!isNodeInGraph(node)) return;
+    if (!node.widgets?.some((widget) => widget.name === PREVIEW_WIDGET_NAME)) {
+      showStatusWidget(node, "waiting");
+    }
+  }, 0);
+}
+
 app.registerExtension({
   name: EXTENSION_NAME,
-  setup() {
-    const graphCanvas = app.canvas;
-    if (!graphCanvas || graphCanvas.__mxhPreviewCanvasPatched) return;
-
-    const onDrawForeground = graphCanvas.onDrawForeground;
-    graphCanvas.onDrawForeground = function onMiaoXiaoHeiCanvasDrawForeground(ctx, visibleNodes) {
-      const result = onDrawForeground?.apply(this, arguments);
-      syncAllPreviewWidgets();
-      return result;
-    };
-
-    graphCanvas.__mxhPreviewCanvasPatched = true;
-  },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "MiaoXiaoHeiSvgPreview") return;
 
@@ -706,11 +632,7 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function onMiaoXiaoHeiPreviewCreated() {
       const result = onNodeCreated?.apply(this, arguments);
       renamePreviewInputs(this);
-      window.setTimeout(() => {
-        if (!this.widgets?.some((widget) => widget.name === PREVIEW_WIDGET_NAME)) {
-          showStatusWidget(this, "waiting");
-        }
-      }, 0);
+      showWaitingWidgetWhenReady(this);
       return result;
     };
 
@@ -718,11 +640,7 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function onMiaoXiaoHeiPreviewConfigured() {
       const result = onConfigure?.apply(this, arguments);
       renamePreviewInputs(this);
-      window.setTimeout(() => {
-        if (!this.widgets?.some((widget) => widget.name === PREVIEW_WIDGET_NAME)) {
-          showStatusWidget(this, "waiting");
-        }
-      }, 0);
+      showWaitingWidgetWhenReady(this);
       return result;
     };
 
@@ -743,21 +661,13 @@ app.registerExtension({
   nodeCreated(node) {
     if (isPreviewNode(node)) {
       renamePreviewInputs(node);
-      window.setTimeout(() => {
-        if (!node.widgets?.some((widget) => widget.name === PREVIEW_WIDGET_NAME)) {
-          showStatusWidget(node, "waiting");
-        }
-      }, 0);
+      showWaitingWidgetWhenReady(node);
     }
   },
   loadedGraphNode(node) {
     if (isPreviewNode(node)) {
       renamePreviewInputs(node);
-      window.setTimeout(() => {
-        if (!node.widgets?.some((widget) => widget.name === PREVIEW_WIDGET_NAME)) {
-          showStatusWidget(node, "waiting");
-        }
-      }, 0);
+      showWaitingWidgetWhenReady(node);
     }
   },
 });
