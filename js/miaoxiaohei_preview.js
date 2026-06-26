@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 const EXTENSION_NAME = "miaoxiaohei.svg.preview";
 const LOGO_URL = new URL("./miaoxiaohei_logo.svg", import.meta.url).href;
@@ -7,6 +8,7 @@ const MIN_NODE_HEIGHT = 520;
 const MIN_WIDGET_WIDTH = 420;
 const MIN_WIDGET_HEIGHT = 300;
 const NODE_HEADER_AND_INPUTS_HEIGHT = 112;
+const PREVIEW_WIDGET_NAME = "mxh_preview_widget";
 
 function svgDataUrl(svgText) {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgText || "")}`;
@@ -56,6 +58,129 @@ function renamePreviewInputs(node) {
   if (changed) {
     node.setDirtyCanvas?.(true, true);
     app.graph?.setDirtyCanvas?.(true, true);
+  }
+}
+
+function isPreviewNode(node) {
+  return node?.comfyClass === "MiaoXiaoHeiSvgPreview" || node?.type === "MiaoXiaoHeiSvgPreview";
+}
+
+function nodeIdEquals(left, right) {
+  return left != null && right != null && String(left) === String(right);
+}
+
+function getExecutingNodeId(detail) {
+  if (detail == null) return null;
+  if (typeof detail === "object") {
+    return detail.node ?? detail.node_id ?? detail.id ?? null;
+  }
+  return detail;
+}
+
+function getGraphNodes() {
+  return app.graph?._nodes || app.graph?.nodes || [];
+}
+
+function getNodeInput(node, names) {
+  return node?.inputs?.find((input) => names.includes(input.name));
+}
+
+function getInputOriginNodeId(node, names) {
+  const input = getNodeInput(node, names);
+  const link = input?.link != null ? app.graph?.links?.[input.link] : null;
+  return link?.origin_id;
+}
+
+function isTrackedExecutionNode(previewNode, executingNodeId) {
+  if (nodeIdEquals(previewNode?.id, executingNodeId)) return true;
+
+  const svgOriginId = getInputOriginNodeId(previewNode, ["SVG结果", "svg_result"]);
+  return nodeIdEquals(svgOriginId, executingNodeId);
+}
+
+function findPreviewNodesForExecution(executingNodeId) {
+  return getGraphNodes().filter((node) => isPreviewNode(node) && isTrackedExecutionNode(node, executingNodeId));
+}
+
+function buildStatusElement(status = "waiting") {
+  const isRunning = status === "running";
+  const root = document.createElement("div");
+  root.className = `mxh-preview mxh-status-preview ${isRunning ? "is-running" : "is-waiting"}`;
+  root.dataset.captureWheel = "true";
+
+  const stage = document.createElement("div");
+  stage.className = "mxh-stage mxh-status-stage";
+  stage.dataset.captureWheel = "true";
+
+  const content = document.createElement("div");
+  content.className = "mxh-status-content";
+
+  const logoWrap = document.createElement("div");
+  logoWrap.className = "mxh-status-logo-wrap";
+
+  const logo = document.createElement("img");
+  logo.src = LOGO_URL;
+  logo.alt = "";
+  logoWrap.appendChild(logo);
+
+  const text = document.createElement("div");
+  text.className = "mxh-status-text";
+  text.textContent = isRunning ? "正在转换" : "等待转换";
+
+  content.append(logoWrap, text);
+  stage.appendChild(content);
+  root.appendChild(stage);
+  return root;
+}
+
+function removePreviewWidget(node) {
+  node.widgets = (node.widgets || []).filter((widget) => {
+    if (widget.name !== PREVIEW_WIDGET_NAME) return true;
+    widget.onRemove?.();
+    return false;
+  });
+}
+
+function attachPreviewWidget(node, element) {
+  syncPreviewElementSize(node, element);
+  const widget = node.addDOMWidget(PREVIEW_WIDGET_NAME, "div", element, {
+    serialize: false,
+    hideOnZoom: false,
+    getMinHeight: () => MIN_WIDGET_HEIGHT,
+    getHeight: () => syncPreviewElementSize(node, element),
+    onResize: () => syncPreviewElementSize(node, element),
+  });
+  widget.computeSize = (width) => {
+    const nodeWidth = Math.max(width || node.size?.[0] || MIN_NODE_WIDTH, MIN_WIDGET_WIDTH);
+    return [nodeWidth, syncPreviewElementSize(node, element)];
+  };
+  widget.computeLayoutSize = (targetNode) => {
+    return {
+      minWidth: MIN_WIDGET_WIDTH,
+      minHeight: syncPreviewElementSize(targetNode || node, element),
+    };
+  };
+  widget.serializeValue = () => undefined;
+  widget.serialize = false;
+  return widget;
+}
+
+function ensurePreviewNodeSizing(node) {
+  node.size = [
+    Math.max(node.size?.[0] || 0, MIN_NODE_WIDTH),
+    Math.max(node.size?.[1] || 0, MIN_NODE_HEIGHT),
+  ];
+  if (!node.__mxhPreviewResizePatched) {
+    const onResize = node.onResize;
+    node.onResize = function onMiaoXiaoHeiPreviewResize(size) {
+      const result = onResize?.apply(this, arguments);
+      const previewWidget = this.widgets?.find((item) => item.name === PREVIEW_WIDGET_NAME);
+      if (previewWidget?.element) {
+        syncPreviewElementSize(this, previewWidget.element);
+      }
+      return result;
+    };
+    node.__mxhPreviewResizePatched = true;
   }
 }
 
@@ -384,56 +509,89 @@ function injectStyles() {
       cursor: default;
       opacity: .78;
     }
+    .mxh-status-preview {
+      grid-template-rows: minmax(0, 1fr);
+      gap: 0;
+    }
+    .mxh-status-stage {
+      cursor: default;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .mxh-status-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      color: #fff;
+      user-select: none;
+      pointer-events: none;
+    }
+    .mxh-status-logo-wrap {
+      width: 74px;
+      height: 74px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: rgba(255,255,255,.96);
+      border: 1px solid rgba(0,0,0,.12);
+      box-shadow: 0 14px 34px rgba(0,0,0,.24);
+    }
+    .mxh-status-logo-wrap img {
+      width: 52px;
+      height: 52px;
+      object-fit: contain;
+    }
+    .mxh-status-text {
+      padding: 6px 14px;
+      border-radius: 999px;
+      background: rgba(0,0,0,.64);
+      color: #fff;
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+    .mxh-status-preview.is-running .mxh-status-logo-wrap {
+      position: relative;
+    }
+    .mxh-status-preview.is-running .mxh-status-logo-wrap::before {
+      content: "";
+      position: absolute;
+      inset: -8px;
+      border-radius: 999px;
+      border: 3px solid rgba(255,255,255,.24);
+      border-top-color: #e7ff97;
+      animation: mxh-spin 1s linear infinite;
+    }
+    @keyframes mxh-spin {
+      to { transform: rotate(360deg); }
+    }
   `;
   document.head.appendChild(style);
+}
+
+function showStatusWidget(node, status = "waiting") {
+  injectStyles();
+  renamePreviewInputs(node);
+  removePreviewWidget(node);
+  const element = buildStatusElement(status);
+  attachPreviewWidget(node, element);
+  ensurePreviewNodeSizing(node);
+  node.__mxhPreviewMode = status;
+  app.graph.setDirtyCanvas(true, true);
 }
 
 function showPreviewWidget(node, data) {
   injectStyles();
   renamePreviewInputs(node);
-  node.widgets = (node.widgets || []).filter((widget) => {
-    if (widget.name !== "mxh_preview_widget") return true;
-    widget.onRemove?.();
-    return false;
-  });
-
+  removePreviewWidget(node);
   const element = buildPreviewElement(data);
-  syncPreviewElementSize(node, element);
-  const widget = node.addDOMWidget("mxh_preview_widget", "div", element, {
-    serialize: false,
-    hideOnZoom: false,
-    getMinHeight: () => MIN_WIDGET_HEIGHT,
-    getHeight: () => syncPreviewElementSize(node, element),
-    onResize: () => syncPreviewElementSize(node, element),
-  });
-  widget.computeSize = (width) => {
-    const nodeWidth = Math.max(width || node.size?.[0] || MIN_NODE_WIDTH, MIN_WIDGET_WIDTH);
-    return [nodeWidth, syncPreviewElementSize(node, element)];
-  };
-  widget.computeLayoutSize = (targetNode) => {
-    return {
-      minWidth: MIN_WIDGET_WIDTH,
-      minHeight: syncPreviewElementSize(targetNode || node, element),
-    };
-  };
-  widget.serializeValue = () => undefined;
-  widget.serialize = false;
-  node.size = [
-    Math.max(node.size?.[0] || 0, MIN_NODE_WIDTH),
-    Math.max(node.size?.[1] || 0, MIN_NODE_HEIGHT),
-  ];
-  if (!node.__mxhPreviewResizePatched) {
-    const onResize = node.onResize;
-    node.onResize = function onMiaoXiaoHeiPreviewResize(size) {
-      const result = onResize?.apply(this, arguments);
-      const previewWidget = this.widgets?.find((item) => item.name === "mxh_preview_widget");
-      if (previewWidget?.element) {
-        syncPreviewElementSize(this, previewWidget.element);
-      }
-      return result;
-    };
-    node.__mxhPreviewResizePatched = true;
-  }
+  attachPreviewWidget(node, element);
+  ensurePreviewNodeSizing(node);
+  node.__mxhPreviewMode = "result";
   app.graph.setDirtyCanvas(true, true);
 }
 
@@ -446,6 +604,11 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function onMiaoXiaoHeiPreviewCreated() {
       const result = onNodeCreated?.apply(this, arguments);
       renamePreviewInputs(this);
+      window.setTimeout(() => {
+        if (!this.widgets?.some((widget) => widget.name === PREVIEW_WIDGET_NAME)) {
+          showStatusWidget(this, "waiting");
+        }
+      }, 0);
       return result;
     };
 
@@ -453,6 +616,11 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function onMiaoXiaoHeiPreviewConfigured() {
       const result = onConfigure?.apply(this, arguments);
       renamePreviewInputs(this);
+      window.setTimeout(() => {
+        if (!this.widgets?.some((widget) => widget.name === PREVIEW_WIDGET_NAME)) {
+          showStatusWidget(this, "waiting");
+        }
+      }, 0);
       return result;
     };
 
@@ -471,13 +639,40 @@ app.registerExtension({
     };
   },
   nodeCreated(node) {
-    if (node?.comfyClass === "MiaoXiaoHeiSvgPreview" || node?.type === "MiaoXiaoHeiSvgPreview") {
+    if (isPreviewNode(node)) {
       renamePreviewInputs(node);
+      window.setTimeout(() => {
+        if (!node.widgets?.some((widget) => widget.name === PREVIEW_WIDGET_NAME)) {
+          showStatusWidget(node, "waiting");
+        }
+      }, 0);
     }
   },
   loadedGraphNode(node) {
-    if (node?.comfyClass === "MiaoXiaoHeiSvgPreview" || node?.type === "MiaoXiaoHeiSvgPreview") {
+    if (isPreviewNode(node)) {
       renamePreviewInputs(node);
+      window.setTimeout(() => {
+        if (!node.widgets?.some((widget) => widget.name === PREVIEW_WIDGET_NAME)) {
+          showStatusWidget(node, "waiting");
+        }
+      }, 0);
     }
   },
+});
+
+api.addEventListener("executing", (event) => {
+  const executingNodeId = getExecutingNodeId(event?.detail);
+
+  if (executingNodeId == null) {
+    for (const node of getGraphNodes()) {
+      if (isPreviewNode(node) && node.__mxhPreviewMode === "running") {
+        showStatusWidget(node, "waiting");
+      }
+    }
+    return;
+  }
+
+  for (const node of findPreviewNodesForExecution(executingNodeId)) {
+    showStatusWidget(node, "running");
+  }
 });
