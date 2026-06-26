@@ -8,6 +8,7 @@ const MIN_NODE_HEIGHT = 520;
 const MIN_WIDGET_WIDTH = 420;
 const MIN_WIDGET_HEIGHT = 300;
 const NODE_HEADER_AND_INPUTS_HEIGHT = 112;
+const NODE_HORIZONTAL_INSET = 24;
 const PREVIEW_WIDGET_NAME = "mxh_preview_widget";
 
 function svgDataUrl(svgText) {
@@ -33,14 +34,46 @@ function getPreviewWidgetHeight(node) {
   return Math.max(MIN_WIDGET_HEIGHT, nodeHeight - NODE_HEADER_AND_INPUTS_HEIGHT);
 }
 
-function syncPreviewElementSize(node, element) {
+function getPreviewWidgetWidth(node, availableWidth) {
+  const rawWidth = Number(availableWidth || node?.size?.[0] || MIN_NODE_WIDTH);
+  return Math.max(MIN_WIDGET_WIDTH, rawWidth - NODE_HORIZONTAL_INSET);
+}
+
+function syncPreviewElementSize(node, element, availableWidth) {
+  const width = getPreviewWidgetWidth(node, availableWidth);
   const height = getPreviewWidgetHeight(node);
-  element.style.width = "100%";
+  const parent = element.parentElement;
+  const nextSizeKey = `${Math.round(width)}x${Math.round(height)}`;
+
+  if (element.__mxhSizeKey === nextSizeKey && parent?.__mxhSizeKey === nextSizeKey) {
+    return { width, height };
+  }
+
+  if (parent) {
+    parent.style.width = `${width}px`;
+    parent.style.height = `${height}px`;
+    parent.style.minHeight = `${MIN_WIDGET_HEIGHT}px`;
+    parent.style.maxWidth = "100%";
+    parent.style.overflow = "hidden";
+    parent.__mxhSizeKey = nextSizeKey;
+  }
+
+  element.style.width = `${width}px`;
   element.style.height = `${height}px`;
+  element.style.maxWidth = "100%";
+  element.style.overflow = "hidden";
   element.style.minHeight = `${MIN_WIDGET_HEIGHT}px`;
+  element.style.setProperty("--mxh-widget-width", `${width}px`);
+  element.style.setProperty("--mxh-widget-height", `${height}px`);
   element.style.setProperty("--comfy-widget-height", `${height}px`);
   element.style.setProperty("--comfy-widget-min-height", `${MIN_WIDGET_HEIGHT}px`);
-  return height;
+  element.__mxhSizeKey = nextSizeKey;
+  return { width, height };
+}
+
+function stopWheelPropagation(event) {
+  event.preventDefault();
+  event.stopPropagation();
 }
 
 function renamePreviewInputs(node) {
@@ -107,6 +140,7 @@ function buildStatusElement(status = "waiting") {
   const root = document.createElement("div");
   root.className = `mxh-preview mxh-status-preview ${isRunning ? "is-running" : "is-waiting"}`;
   root.dataset.captureWheel = "true";
+  root.addEventListener("wheel", stopWheelPropagation, { passive: false });
 
   const stage = document.createElement("div");
   stage.className = "mxh-stage mxh-status-stage";
@@ -147,17 +181,19 @@ function attachPreviewWidget(node, element) {
     serialize: false,
     hideOnZoom: false,
     getMinHeight: () => MIN_WIDGET_HEIGHT,
-    getHeight: () => syncPreviewElementSize(node, element),
+    getHeight: () => syncPreviewElementSize(node, element).height,
     onResize: () => syncPreviewElementSize(node, element),
   });
   widget.computeSize = (width) => {
     const nodeWidth = Math.max(width || node.size?.[0] || MIN_NODE_WIDTH, MIN_WIDGET_WIDTH);
-    return [nodeWidth, syncPreviewElementSize(node, element)];
+    const size = syncPreviewElementSize(node, element, width);
+    return [nodeWidth, size.height];
   };
   widget.computeLayoutSize = (targetNode) => {
+    const size = syncPreviewElementSize(targetNode || node, element);
     return {
       minWidth: MIN_WIDGET_WIDTH,
-      minHeight: syncPreviewElementSize(targetNode || node, element),
+      minHeight: size.height,
     };
   };
   widget.serializeValue = () => undefined;
@@ -180,7 +216,39 @@ function ensurePreviewNodeSizing(node) {
       }
       return result;
     };
+    const onDrawForeground = node.onDrawForeground;
+    node.onDrawForeground = function onMiaoXiaoHeiPreviewDrawForeground(ctx) {
+      const result = onDrawForeground?.apply(this, arguments);
+      const previewWidget = this.widgets?.find((item) => item.name === PREVIEW_WIDGET_NAME);
+      if (previewWidget?.element) {
+        syncPreviewElementSize(this, previewWidget.element);
+      }
+      return result;
+    };
+    const onMouseMove = node.onMouseMove;
+    node.onMouseMove = function onMiaoXiaoHeiPreviewMouseMove(event, pos, graphCanvas) {
+      const result = onMouseMove?.apply(this, arguments);
+      const previewWidget = this.widgets?.find((item) => item.name === PREVIEW_WIDGET_NAME);
+      if (previewWidget?.element) {
+        syncPreviewElementSize(this, previewWidget.element);
+      }
+      return result;
+    };
     node.__mxhPreviewResizePatched = true;
+  }
+}
+
+function syncPreviewNodeWidget(node) {
+  if (!isPreviewNode(node)) return;
+  const previewWidget = node.widgets?.find((item) => item.name === PREVIEW_WIDGET_NAME);
+  if (previewWidget?.element) {
+    syncPreviewElementSize(node, previewWidget.element);
+  }
+}
+
+function syncAllPreviewWidgets() {
+  for (const node of getGraphNodes()) {
+    syncPreviewNodeWidget(node);
   }
 }
 
@@ -264,6 +332,7 @@ function buildPreviewElement(data) {
   const root = document.createElement("div");
   root.className = "mxh-preview";
   root.dataset.captureWheel = "true";
+  root.addEventListener("wheel", stopWheelPropagation, { passive: false });
 
   const stage = document.createElement("div");
   stage.className = "mxh-stage";
@@ -347,8 +416,7 @@ function buildPreviewElement(data) {
   });
 
   stage.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
+    stopWheelPropagation(event);
 
     const previousZoom = zoom;
     const direction = event.deltaY > 0 ? -1 : 1;
@@ -386,12 +454,12 @@ function injectStyles() {
   style.id = "mxh-preview-style";
   style.textContent = `
     .mxh-preview {
-      width: 100%;
-      height: 100%;
+      width: var(--mxh-widget-width, 100%);
+      height: var(--mxh-widget-height, 100%);
       min-height: 260px;
       padding: 12px;
       border-radius: 12px;
-      background: #171717;
+      background: #1f1f1f;
       color: #fff;
       box-sizing: border-box;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -406,11 +474,11 @@ function injectStyles() {
       overflow: hidden;
       border-radius: 10px;
       background:
-        linear-gradient(45deg, rgba(255,255,255,.08) 25%, transparent 25%),
-        linear-gradient(-45deg, rgba(255,255,255,.08) 25%, transparent 25%),
-        linear-gradient(45deg, transparent 75%, rgba(255,255,255,.08) 75%),
-        linear-gradient(-45deg, transparent 75%, rgba(255,255,255,.08) 75%),
-        #202033;
+        linear-gradient(45deg, rgba(255,255,255,.045) 25%, transparent 25%),
+        linear-gradient(-45deg, rgba(255,255,255,.045) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, rgba(255,255,255,.045) 75%),
+        linear-gradient(-45deg, transparent 75%, rgba(255,255,255,.045) 75%),
+        #242424;
       background-size: 22px 22px;
       background-position: 0 0, 0 11px, 11px -11px, -11px 0;
       cursor: zoom-in;
@@ -530,15 +598,15 @@ function injectStyles() {
       pointer-events: none;
     }
     .mxh-status-logo-wrap {
-      width: 74px;
-      height: 74px;
+      width: 72px;
+      height: 72px;
       display: flex;
       align-items: center;
       justify-content: center;
       border-radius: 999px;
-      background: rgba(255,255,255,.96);
-      border: 1px solid rgba(0,0,0,.12);
-      box-shadow: 0 14px 34px rgba(0,0,0,.24);
+      background: rgba(245,245,245,.96);
+      border: 1px solid rgba(255,255,255,.1);
+      box-shadow: 0 14px 34px rgba(0,0,0,.3);
     }
     .mxh-status-logo-wrap img {
       width: 52px;
@@ -548,7 +616,7 @@ function injectStyles() {
     .mxh-status-text {
       padding: 6px 14px;
       border-radius: 999px;
-      background: rgba(0,0,0,.64);
+      background: rgba(17,17,17,.76);
       color: #fff;
       font-size: 18px;
       font-weight: 800;
@@ -562,8 +630,8 @@ function injectStyles() {
       position: absolute;
       inset: -8px;
       border-radius: 999px;
-      border: 3px solid rgba(255,255,255,.24);
-      border-top-color: #e7ff97;
+      border: 3px solid rgba(255,255,255,.18);
+      border-top-color: #9dd6ff;
       animation: mxh-spin 1s linear infinite;
     }
     @keyframes mxh-spin {
@@ -597,6 +665,19 @@ function showPreviewWidget(node, data) {
 
 app.registerExtension({
   name: EXTENSION_NAME,
+  setup() {
+    const graphCanvas = app.canvas;
+    if (!graphCanvas || graphCanvas.__mxhPreviewCanvasPatched) return;
+
+    const onDrawForeground = graphCanvas.onDrawForeground;
+    graphCanvas.onDrawForeground = function onMiaoXiaoHeiCanvasDrawForeground(ctx, visibleNodes) {
+      const result = onDrawForeground?.apply(this, arguments);
+      syncAllPreviewWidgets();
+      return result;
+    };
+
+    graphCanvas.__mxhPreviewCanvasPatched = true;
+  },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "MiaoXiaoHeiSvgPreview") return;
 
