@@ -8,7 +8,6 @@ const MIN_NODE_HEIGHT = 520;
 const MIN_WIDGET_WIDTH = 420;
 const MIN_WIDGET_HEIGHT = 300;
 const NODE_HEADER_AND_INPUTS_HEIGHT = 112;
-const NODE_HORIZONTAL_INSET = 24;
 const PREVIEW_WIDGET_NAME = "mxh_preview_widget";
 
 function svgDataUrl(svgText) {
@@ -62,7 +61,37 @@ function clampPreviewNodeSize(node, size = node?.size) {
 
 function getPreviewWidgetWidth(node) {
   const rawWidth = Number(node?.size?.[0] || MIN_NODE_WIDTH);
-  return Math.max(MIN_WIDGET_WIDTH, rawWidth - NODE_HORIZONTAL_INSET);
+  return Math.max(MIN_WIDGET_WIDTH, rawWidth);
+}
+
+function getPreviewWidgetMargin(widget) {
+  return Number(widget?.margin ?? 10) || 0;
+}
+
+function syncPreviewWidgetMetrics(node, widget, element) {
+  clampPreviewNodeSize(node);
+  const nodeWidth = Math.max(Number(node?.size?.[0]) || 0, MIN_NODE_WIDTH);
+  const margin = getPreviewWidgetMargin(widget);
+  const height = getPreviewWidgetHeight(node);
+  const computedHeight = height + margin * 2;
+  if (widget) {
+    widget.width = nodeWidth;
+    widget.computedHeight = computedHeight;
+  }
+  if (element) {
+    element.style.width = "100%";
+    element.style.maxWidth = "100%";
+    element.style.height = `${height}px`;
+    element.style.setProperty("--mxh-widget-height", `${height}px`);
+    element.style.setProperty("--comfy-widget-height", `${height}px`);
+    element.style.setProperty("--comfy-widget-min-height", `${MIN_WIDGET_HEIGHT}px`);
+    const host = element.parentElement;
+    if (host?.classList?.contains("dom-widget")) {
+      host.style.width = `${Math.max(0, nodeWidth - margin * 2)}px`;
+      host.style.height = `${height}px`;
+    }
+  }
+  return { width: nodeWidth, height, computedHeight };
 }
 
 function syncPreviewElementSize(node, element) {
@@ -94,10 +123,16 @@ function stopWheelPropagation(event) {
 }
 
 function syncAfterInteraction(node, element) {
-  window.requestAnimationFrame(() => {
+  const sync = () => {
     if (!isNodeInGraph(node)) return;
+    const previewWidget = node.widgets?.find((item) => item.name === PREVIEW_WIDGET_NAME);
+    syncPreviewWidgetMetrics(node, previewWidget, element);
     syncPreviewElementSize(node, element);
     app.graph?.setDirtyCanvas?.(true, true);
+  };
+  window.requestAnimationFrame(() => {
+    sync();
+    window.requestAnimationFrame(sync);
   });
 }
 
@@ -214,25 +249,28 @@ function attachPreviewWidget(node, element) {
   element.addEventListener("pointerdown", () => syncAfterInteraction(node, element));
   element.addEventListener("pointerup", () => syncAfterInteraction(node, element));
   element.addEventListener("click", () => syncAfterInteraction(node, element));
-  const widget = node.addDOMWidget(PREVIEW_WIDGET_NAME, "div", element, {
+  let widget;
+  widget = node.addDOMWidget(PREVIEW_WIDGET_NAME, "div", element, {
     serialize: false,
     hideOnZoom: false,
+    margin: 10,
     getMinHeight: () => MIN_WIDGET_HEIGHT,
-    getHeight: () => syncPreviewElementSize(node, element).height,
-    onResize: () => syncPreviewElementSize(node, element),
+    getHeight: () => syncPreviewWidgetMetrics(node, widget, element).computedHeight,
+    afterResize: () => syncPreviewWidgetMetrics(node, widget, element),
+    onDraw: () => syncPreviewWidgetMetrics(node, widget, element),
   });
+  syncPreviewWidgetMetrics(node, widget, element);
   widget.computeSize = (width) => {
     if (Number(width) > 0 && width < MIN_NODE_WIDTH) {
       node.size[0] = MIN_NODE_WIDTH;
     }
     clampPreviewNodeSize(node);
-    const nodeWidth = Math.max(node.size?.[0] || MIN_NODE_WIDTH, MIN_NODE_WIDTH);
-    const size = syncPreviewElementSize(node, element);
-    return [nodeWidth, size.height];
+    const size = syncPreviewWidgetMetrics(node, widget, element);
+    return [size.width, Math.max(MIN_WIDGET_HEIGHT, size.computedHeight - 4)];
   };
   widget.computeLayoutSize = (targetNode) => {
     clampPreviewNodeSize(targetNode || node);
-    const size = syncPreviewElementSize(targetNode || node, element);
+    const size = syncPreviewWidgetMetrics(targetNode || node, widget, element);
     return {
       minWidth: MIN_NODE_WIDTH,
       minHeight: size.height,
@@ -267,6 +305,7 @@ function ensurePreviewNodeSizing(node) {
       const clamped = clampPreviewNodeSize(this, size) || clampedBefore;
       const previewWidget = this.widgets?.find((item) => item.name === PREVIEW_WIDGET_NAME);
       if (previewWidget?.element) {
+        syncPreviewWidgetMetrics(this, previewWidget, previewWidget.element);
         syncPreviewElementSize(this, previewWidget.element);
       }
       if (clamped) {
