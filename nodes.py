@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover - only used outside ComfyUI during local c
     folder_paths = None
 
 
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 DEFAULT_BASE_URL = "https://www.miaoxiaohei.com"
 USER_AGENT = f"ComfyUI-MiaoXiaoHei/{PLUGIN_VERSION}"
 DEFAULT_MAX_PIXELS = 2000 * 2000
@@ -32,6 +32,10 @@ def _clean_base_url(base_url: str) -> str:
     if not value:
         value = DEFAULT_BASE_URL
     return value.rstrip("/")
+
+
+def _default_base_url() -> str:
+    return _clean_base_url(os.environ.get("MIAOXIAOHEI_BASE_URL", DEFAULT_BASE_URL))
 
 
 def _api_key(api_key: str) -> str:
@@ -65,12 +69,15 @@ def _http_request(
         raise RuntimeError(f"API request failed: {error.reason}") from error
 
 
-def _append_query(url: str, params: Dict[str, Any]) -> str:
-    clean_params = {key: value for key, value in params.items() if value is not None}
-    if not clean_params:
-        return url
-    separator = "&" if "?" in url else "?"
-    return f"{url}{separator}{urllib.parse.urlencode(clean_params)}"
+def _absolute_url(base_url: str, path_or_url: str) -> str:
+    value = str(path_or_url or "").strip()
+    if not value:
+        return ""
+    if value.startswith(("http://", "https://")):
+        return value
+    if not value.startswith("/"):
+        value = f"/{value}"
+    return f"{_clean_base_url(base_url)}{value}"
 
 
 def _multipart_form_data(field_name: str, filename: str, content: bytes, content_type: str) -> Tuple[bytes, str]:
@@ -215,31 +222,27 @@ class MiaoXiaoHeiVectorize:
             "required": {
                 "image": ("IMAGE",),
                 "api_key": ("STRING", {"default": "", "multiline": False}),
-                "base_url": ("STRING", {"default": DEFAULT_BASE_URL, "multiline": False}),
-                "filename_prefix": ("STRING", {"default": "miaoxiaohei_vector", "multiline": False}),
-                "max_pixels": ("INT", {"default": DEFAULT_MAX_PIXELS, "min": 65536, "max": HARD_MAX_PIXELS, "step": 65536}),
-                "upload_quality": ("INT", {"default": DEFAULT_UPLOAD_QUALITY, "min": 1, "max": 100, "step": 1}),
-                "timeout_seconds": ("INT", {"default": 180, "min": 10, "max": 900, "step": 10}),
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("svg_text", "svg_path", "request_id", "downloads_json")
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("SVG文件", "下载链接")
     FUNCTION = "run"
-    CATEGORY = "MiaoXiaoHei/API"
+    CATEGORY = "喵小黑"
+    OUTPUT_NODE = True
 
     def run(
         self,
         image,
         api_key: str,
-        base_url: str = DEFAULT_BASE_URL,
-        filename_prefix: str = "miaoxiaohei_vector",
-        max_pixels: int = DEFAULT_MAX_PIXELS,
-        upload_quality: int = DEFAULT_UPLOAD_QUALITY,
-        timeout_seconds: int = 180,
-    ) -> Tuple[str, str, str, str]:
-        upload_bytes, upload_name, upload_mime = _prepare_upload_image(image, max_pixels, upload_quality)
-        url = f"{_clean_base_url(base_url)}/api/vectorize"
+    ) -> Dict[str, Any]:
+        base_url = _default_base_url()
+        upload_bytes, upload_name, upload_mime = _prepare_upload_image(
+            image,
+            DEFAULT_MAX_PIXELS,
+            DEFAULT_UPLOAD_QUALITY,
+        )
+        url = f"{base_url}/api/vectorize"
         body, content_type = _multipart_form_data("image", upload_name, upload_bytes, upload_mime)
         headers = {
             **_headers(api_key),
@@ -250,7 +253,7 @@ class MiaoXiaoHeiVectorize:
             method="POST",
             headers=headers,
             body=body,
-            timeout=max(10, int(timeout_seconds or 180)),
+            timeout=180,
         )
         payload = _read_json_response(status_code, content)
         _raise_for_api_error(payload, f"Vectorize failed with HTTP {status_code}.")
@@ -260,130 +263,39 @@ class MiaoXiaoHeiVectorize:
             raise RuntimeError("API response did not include valid SVG text.")
 
         request_id = str(payload.get("request_id") or "")
-        svg_path = _unique_path(filename_prefix, "svg", request_id)
+        svg_path = _unique_path("miaoxiaohei_vector", "svg", request_id)
         svg_path.write_text(svg_text, encoding="utf-8")
 
         downloads = payload.get("downloads") or {}
-        downloads_json = json.dumps(downloads, ensure_ascii=False, indent=2)
-        return svg_text, str(svg_path), request_id, downloads_json
-
-
-class MiaoXiaoHeiDownloadResult:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "request_id": ("STRING", {"default": "", "multiline": False}),
-                "api_key": ("STRING", {"default": "", "multiline": False}),
-                "base_url": ("STRING", {"default": DEFAULT_BASE_URL, "multiline": False}),
-                "format": (["svg", "pdf", "eps"], {"default": "svg"}),
-                "filename_prefix": ("STRING", {"default": "miaoxiaohei_download", "multiline": False}),
-                "timeout_seconds": ("INT", {"default": 180, "min": 10, "max": 900, "step": 10}),
-            }
-        }
-
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("file_path",)
-    FUNCTION = "run"
-    CATEGORY = "MiaoXiaoHei/API"
-
-    def run(
-        self,
-        request_id: str,
-        api_key: str,
-        base_url: str = DEFAULT_BASE_URL,
-        format: str = "svg",
-        filename_prefix: str = "miaoxiaohei_download",
-        timeout_seconds: int = 180,
-    ) -> Tuple[str]:
-        clean_request_id = str(request_id or "").strip()
-        if not clean_request_id:
-            raise ValueError("request_id is required.")
-
-        output_format = str(format or "svg").strip().lower()
-        if output_format not in {"svg", "pdf", "eps"}:
-            raise ValueError("format must be svg, pdf, or eps.")
-
-        url = f"{_clean_base_url(base_url)}/api/vectorize/download/{clean_request_id}/{output_format}"
-        status_code, response_headers, content = _http_request(
-            url,
-            method="GET",
-            headers=_headers(api_key),
-            timeout=max(10, int(timeout_seconds or 180)),
-        )
-        content_type = response_headers.get("Content-Type", "")
-
-        if "application/json" in content_type:
-            payload = _read_json_response(status_code, content)
-            _raise_for_api_error(payload, f"Download failed with HTTP {status_code}.")
-
-        if status_code >= 400:
-            text = content.decode("utf-8", errors="replace")[:500] if content else ""
-            raise RuntimeError(f"Download failed with HTTP {status_code}: {text}")
-
-        file_path = _unique_path(filename_prefix, output_format, clean_request_id)
-        file_path.write_bytes(content)
-        return (str(file_path),)
-
-
-class MiaoXiaoHeiUsage:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "api_key": ("STRING", {"default": "", "multiline": False}),
-                "base_url": ("STRING", {"default": DEFAULT_BASE_URL, "multiline": False}),
-                "page": ("INT", {"default": 1, "min": 1, "max": 9999, "step": 1}),
-                "timeout_seconds": ("INT", {"default": 60, "min": 10, "max": 300, "step": 10}),
-            }
-        }
-
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("summary", "raw_json")
-    FUNCTION = "run"
-    CATEGORY = "MiaoXiaoHei/API"
-
-    def run(
-        self,
-        api_key: str,
-        base_url: str = DEFAULT_BASE_URL,
-        page: int = 1,
-        timeout_seconds: int = 60,
-    ) -> Tuple[str, str]:
-        url = _append_query(
-            f"{_clean_base_url(base_url)}/api/vectorize/usage",
-            {"page": max(1, int(page or 1))},
-        )
-        status_code, _, content = _http_request(
-            url,
-            method="GET",
-            headers=_headers(api_key),
-            timeout=max(10, int(timeout_seconds or 60)),
-        )
-        payload = _read_json_response(status_code, content)
-        _raise_for_api_error(payload, f"Usage query failed with HTTP {status_code}.")
-
-        data = payload.get("data") or {}
-        client = data.get("client") or {}
+        download_url = _absolute_url(base_url, downloads.get("svg") or "")
         summary = (
-            f"name: {client.get('name') or '-'}\n"
-            f"status: {client.get('status') or '-'}\n"
-            f"quota: {client.get('used_quota', 0)} / {client.get('total_quota', 0)}\n"
-            f"remaining: {client.get('remaining_quota', 0)}\n"
-            f"rate_limit_per_minute: {client.get('rate_limit_per_minute', '-')}\n"
-            f"expires_at: {client.get('expires_at') or '-'}"
+            "转换成功\n"
+            f"SVG 文件: {svg_path}\n"
+            f"官网下载: {download_url or '-'}"
         )
-        return summary, json.dumps(payload, ensure_ascii=False, indent=2)
+
+        return {
+            "ui": {
+                "images": [
+                    {
+                        "filename": svg_path.name,
+                        "subfolder": "miaoxiaohei",
+                        "type": "output",
+                    }
+                ],
+                "svg": [svg_text],
+                "svg_path": [str(svg_path)],
+                "download_url": [download_url],
+                "summary": [summary],
+            },
+            "result": (str(svg_path), download_url),
+        }
 
 
 NODE_CLASS_MAPPINGS = {
     "MiaoXiaoHeiVectorize": MiaoXiaoHeiVectorize,
-    "MiaoXiaoHeiDownloadResult": MiaoXiaoHeiDownloadResult,
-    "MiaoXiaoHeiUsage": MiaoXiaoHeiUsage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MiaoXiaoHeiVectorize": "MiaoXiaoHei Image to SVG",
-    "MiaoXiaoHeiDownloadResult": "MiaoXiaoHei Download Result",
-    "MiaoXiaoHeiUsage": "MiaoXiaoHei API Usage",
+    "MiaoXiaoHeiVectorize": "喵小黑图片转 SVG",
 }
