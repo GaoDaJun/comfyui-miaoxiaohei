@@ -40,9 +40,9 @@ function getPreviewWidgetWidth(node, availableWidth) {
 }
 
 function syncPreviewElementSize(node, element, availableWidth) {
+  const parent = element.parentElement;
   const width = getPreviewWidgetWidth(node, availableWidth);
   const height = getPreviewWidgetHeight(node);
-  const parent = element.parentElement;
   const nextSizeKey = `${Math.round(width)}x${Math.round(height)}`;
 
   if (element.__mxhSizeKey === nextSizeKey && parent?.__mxhSizeKey === nextSizeKey) {
@@ -69,6 +69,17 @@ function syncPreviewElementSize(node, element, availableWidth) {
   element.style.setProperty("--comfy-widget-min-height", `${MIN_WIDGET_HEIGHT}px`);
   element.__mxhSizeKey = nextSizeKey;
   return { width, height };
+}
+
+function schedulePreviewSync(node, element) {
+  if (!node || !element) return;
+  if (element.__mxhSyncFrame) {
+    cancelAnimationFrame(element.__mxhSyncFrame);
+  }
+  element.__mxhSyncFrame = requestAnimationFrame(() => {
+    element.__mxhSyncFrame = null;
+    syncPreviewElementSize(node, element);
+  });
 }
 
 function stopWheelPropagation(event) {
@@ -170,6 +181,14 @@ function buildStatusElement(status = "waiting") {
 function removePreviewWidget(node) {
   node.widgets = (node.widgets || []).filter((widget) => {
     if (widget.name !== PREVIEW_WIDGET_NAME) return true;
+    if (widget.element?.__mxhResizeObserver) {
+      widget.element.__mxhResizeObserver.disconnect();
+      widget.element.__mxhResizeObserver = null;
+    }
+    if (widget.element?.__mxhSyncFrame) {
+      cancelAnimationFrame(widget.element.__mxhSyncFrame);
+      widget.element.__mxhSyncFrame = null;
+    }
     widget.onRemove?.();
     return false;
   });
@@ -198,6 +217,23 @@ function attachPreviewWidget(node, element) {
   };
   widget.serializeValue = () => undefined;
   widget.serialize = false;
+  const onRemove = widget.onRemove;
+  widget.onRemove = () => {
+    element.__mxhResizeObserver?.disconnect();
+    element.__mxhResizeObserver = null;
+    if (element.__mxhSyncFrame) {
+      cancelAnimationFrame(element.__mxhSyncFrame);
+      element.__mxhSyncFrame = null;
+    }
+    onRemove?.();
+  };
+  window.setTimeout(() => {
+    if (!element.parentElement || element.__mxhResizeObserver) return;
+    const resizeObserver = new ResizeObserver(() => schedulePreviewSync(node, element));
+    resizeObserver.observe(element.parentElement);
+    resizeObserver.observe(element);
+    element.__mxhResizeObserver = resizeObserver;
+  }, 0);
   return widget;
 }
 
@@ -454,8 +490,8 @@ function injectStyles() {
   style.id = "mxh-preview-style";
   style.textContent = `
     .mxh-preview {
-      width: var(--mxh-widget-width, 100%);
-      height: var(--mxh-widget-height, 100%);
+      width: 100%;
+      height: 100%;
       min-height: 260px;
       padding: 12px;
       border-radius: 12px;
@@ -470,6 +506,7 @@ function injectStyles() {
     .mxh-stage {
       position: relative;
       width: 100%;
+      height: 100%;
       min-height: 0;
       overflow: hidden;
       border-radius: 10px;
