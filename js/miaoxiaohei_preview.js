@@ -34,12 +34,39 @@ function getPreviewWidgetHeight(node) {
   return Math.max(MIN_WIDGET_HEIGHT, nodeHeight - NODE_HEADER_AND_INPUTS_HEIGHT);
 }
 
+function clampPreviewNodeSize(node, size = node?.size) {
+  if (!node) return false;
+  if (!node.size) node.size = [MIN_NODE_WIDTH, MIN_NODE_HEIGHT];
+  const target = Array.isArray(size) ? size : node.size;
+  const width = Math.max(Number(target[0] ?? node.size[0]) || 0, MIN_NODE_WIDTH);
+  const height = Math.max(Number(target[1] ?? node.size[1]) || 0, MIN_NODE_HEIGHT);
+  const changed =
+    width !== target[0] ||
+    height !== target[1] ||
+    width !== node.size[0] ||
+    height !== node.size[1];
+  target[0] = width;
+  target[1] = height;
+  node.size[0] = width;
+  node.size[1] = height;
+  node.min_width = Math.max(node.min_width || 0, MIN_NODE_WIDTH);
+  node.minWidth = Math.max(node.minWidth || 0, MIN_NODE_WIDTH);
+  node.min_height = Math.max(node.min_height || 0, MIN_NODE_HEIGHT);
+  node.minHeight = Math.max(node.minHeight || 0, MIN_NODE_HEIGHT);
+  node.min_size = [
+    Math.max(node.min_size?.[0] || 0, MIN_NODE_WIDTH),
+    Math.max(node.min_size?.[1] || 0, MIN_NODE_HEIGHT),
+  ];
+  return changed;
+}
+
 function getPreviewWidgetWidth(node) {
   const rawWidth = Number(node?.size?.[0] || MIN_NODE_WIDTH);
   return Math.max(MIN_WIDGET_WIDTH, rawWidth - NODE_HORIZONTAL_INSET);
 }
 
 function syncPreviewElementSize(node, element) {
+  clampPreviewNodeSize(node);
   const width = getPreviewWidgetWidth(node);
   const height = getPreviewWidgetHeight(node);
   const nextSizeKey = `${Math.round(width)}x${Math.round(height)}`;
@@ -50,7 +77,7 @@ function syncPreviewElementSize(node, element) {
 
   element.style.width = "100%";
   element.style.height = `${height}px`;
-  element.style.minWidth = `${width}px`;
+  element.style.minWidth = "0";
   element.style.maxWidth = "100%";
   element.style.overflow = "hidden";
   element.style.minHeight = `${MIN_WIDGET_HEIGHT}px`;
@@ -182,6 +209,7 @@ function removePreviewWidget(node) {
 }
 
 function attachPreviewWidget(node, element) {
+  clampPreviewNodeSize(node);
   syncPreviewElementSize(node, element);
   element.addEventListener("pointerdown", () => syncAfterInteraction(node, element));
   element.addEventListener("pointerup", () => syncAfterInteraction(node, element));
@@ -194,14 +222,19 @@ function attachPreviewWidget(node, element) {
     onResize: () => syncPreviewElementSize(node, element),
   });
   widget.computeSize = (width) => {
-    const nodeWidth = Math.max(node.size?.[0] || MIN_NODE_WIDTH, MIN_WIDGET_WIDTH);
+    if (Number(width) > 0 && width < MIN_NODE_WIDTH) {
+      node.size[0] = MIN_NODE_WIDTH;
+    }
+    clampPreviewNodeSize(node);
+    const nodeWidth = Math.max(node.size?.[0] || MIN_NODE_WIDTH, MIN_NODE_WIDTH);
     const size = syncPreviewElementSize(node, element);
     return [nodeWidth, size.height];
   };
   widget.computeLayoutSize = (targetNode) => {
+    clampPreviewNodeSize(targetNode || node);
     const size = syncPreviewElementSize(targetNode || node, element);
     return {
-      minWidth: MIN_WIDGET_WIDTH,
+      minWidth: MIN_NODE_WIDTH,
       minHeight: size.height,
     };
   };
@@ -211,17 +244,34 @@ function attachPreviewWidget(node, element) {
 }
 
 function ensurePreviewNodeSizing(node) {
-  node.size = [
-    Math.max(node.size?.[0] || 0, MIN_NODE_WIDTH),
-    Math.max(node.size?.[1] || 0, MIN_NODE_HEIGHT),
-  ];
+  if (!node.size) node.size = [MIN_NODE_WIDTH, MIN_NODE_HEIGHT];
+  clampPreviewNodeSize(node);
+  if (!node.__mxhPreviewComputePatched) {
+    const computeSize = node.computeSize;
+    node.computeSize = function computeMiaoXiaoHeiPreviewSize() {
+      const size = computeSize?.apply(this, arguments) || [...this.size];
+      if (Array.isArray(size)) {
+        size[0] = Math.max(size[0] || 0, MIN_NODE_WIDTH);
+        size[1] = Math.max(size[1] || 0, MIN_NODE_HEIGHT);
+      }
+      clampPreviewNodeSize(this);
+      return size;
+    };
+    node.__mxhPreviewComputePatched = true;
+  }
   if (!node.__mxhPreviewResizePatched) {
     const onResize = node.onResize;
     node.onResize = function onMiaoXiaoHeiPreviewResize(size) {
+      const clampedBefore = clampPreviewNodeSize(this, size);
       const result = onResize?.apply(this, arguments);
+      const clamped = clampPreviewNodeSize(this, size) || clampedBefore;
       const previewWidget = this.widgets?.find((item) => item.name === PREVIEW_WIDGET_NAME);
       if (previewWidget?.element) {
         syncPreviewElementSize(this, previewWidget.element);
+      }
+      if (clamped) {
+        this.setDirtyCanvas?.(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
       }
       return result;
     };
@@ -411,6 +461,7 @@ function injectStyles() {
     .mxh-preview {
       width: 100%;
       height: 100%;
+      min-width: 0;
       min-height: 260px;
       padding: 12px;
       border-radius: 12px;
@@ -426,6 +477,7 @@ function injectStyles() {
       position: relative;
       width: 100%;
       height: 100%;
+      min-width: 0;
       min-height: 0;
       overflow: hidden;
       border-radius: 10px;
@@ -437,12 +489,14 @@ function injectStyles() {
         #242424;
       background-size: 22px 22px;
       background-position: 0 0, 0 11px, 11px -11px, -11px 0;
-      cursor: zoom-in;
+      cursor: default;
       touch-action: none;
     }
     .mxh-viewport {
       position: absolute;
       inset: 0;
+      min-width: 0;
+      min-height: 0;
       overflow: hidden;
       transform-origin: center center;
     }
@@ -515,6 +569,7 @@ function injectStyles() {
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 8px;
       margin: 0;
+      min-width: 0;
       height: 40px;
       min-height: 40px;
       overflow: visible;
