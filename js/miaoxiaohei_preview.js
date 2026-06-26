@@ -414,21 +414,12 @@ function buildPreviewElement(data) {
   stage.append(viewport, leftTag, rightTag);
 
   let ratio = 0.5;
-  let zoom = 1;
-  let offsetX = 0;
-  let offsetY = 0;
 
   const applyRatio = () => {
     const percent = `${Math.round(ratio * 10000) / 100}%`;
     svgWrap.style.clipPath = `inset(0 0 0 ${percent})`;
     line.style.left = percent;
     handle.style.left = percent;
-  };
-
-  const applyTransform = () => {
-    const transform = `translate(${offsetX}px, ${offsetY}px) scale(${zoom})`;
-    original.style.transform = transform;
-    svgImage.style.transform = transform;
   };
 
   const move = (event) => {
@@ -453,22 +444,9 @@ function buildPreviewElement(data) {
 
   stage.addEventListener("wheel", (event) => {
     stopWheelPropagation(event);
-
-    const previousZoom = zoom;
-    const direction = event.deltaY > 0 ? -1 : 1;
-    zoom = Math.max(0.35, Math.min(6, zoom * (direction > 0 ? 1.12 : 0.88)));
-
-    const rect = viewport.getBoundingClientRect();
-    const pointX = event.clientX - rect.left - rect.width / 2;
-    const pointY = event.clientY - rect.top - rect.height / 2;
-    const scaleChange = zoom / previousZoom;
-    offsetX = pointX - (pointX - offsetX) * scaleChange;
-    offsetY = pointY - (pointY - offsetY) * scaleChange;
-    applyTransform();
   }, { passive: false });
 
   applyRatio();
-  applyTransform();
 
   const actions = document.createElement("div");
   actions.className = "mxh-actions";
@@ -500,8 +478,8 @@ function injectStyles() {
       box-sizing: border-box;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       display: grid;
-      grid-template-rows: minmax(0, 1fr) auto;
-      gap: 10px;
+      grid-template-rows: minmax(0, 1fr) 40px;
+      gap: 8px;
     }
     .mxh-stage {
       position: relative;
@@ -596,9 +574,13 @@ function injectStyles() {
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 8px;
       margin: 0;
+      height: 40px;
+      min-height: 40px;
+      overflow: visible;
     }
     .mxh-actions button {
-      min-height: 32px;
+      height: 36px;
+      min-height: 36px;
       border: 1px solid rgba(255,255,255,.14);
       border-radius: 8px;
       background: #ffffff;
@@ -606,6 +588,8 @@ function injectStyles() {
       font-size: 12px;
       font-weight: 800;
       cursor: pointer;
+      line-height: 1;
+      white-space: nowrap;
     }
     .mxh-actions button:hover {
       background: #e7ff97;
