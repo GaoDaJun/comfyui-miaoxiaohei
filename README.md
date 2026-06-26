@@ -21,9 +21,13 @@ git clone https://github.com/GaoDaJun/comfyui-miaoxiaohei.git
 2. 添加 `喵小黑图片转 SVG` 节点。
 3. 把图片连接到节点的 `image`。
 4. 在 `api_key` 填入你的喵小黑 ComfyUI API Key。
-5. 运行工作流。
+5. 添加 `喵小黑预览 SVG` 节点。
+6. 把 `SVG结果` 和原图连接到预览节点。
+7. 运行工作流。
 
-转换成功后，节点里会显示 SVG 预览，并把 SVG 文件保存到 ComfyUI 输出目录。
+转换成功后，预览节点里可以滑动对比原图和 SVG 结果，并支持下载 SVG、复制 SVG、下载 PDF、下载 EPS。
+
+SVG 文件也会自动保存到 ComfyUI 输出目录。
 
 ## API Key
 
