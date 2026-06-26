@@ -61,6 +61,7 @@ def _api_key(api_key: str) -> str:
 def _headers(api_key: str) -> Dict[str, str]:
     return {
         "X-API-Key": _api_key(api_key),
+        "X-MiaoXiaoHei-Client": "comfyui",
         "User-Agent": USER_AGENT,
     }
 
